@@ -59,18 +59,30 @@ def _detect_handedness(frames):
 
 
 def _detect_release_frame(frames, sides):
-    """Release = frame where the throwing wrist has peak forward speed.
-    Computed as the largest frame-to-frame horizontal displacement of the
-    throwing wrist. This reliably lands at/just before ball release."""
-    ser = _series(frames, sides["throw_wrist"], 0)
-    if len(ser) < 3:
+    """Release = the frame where the throwing wrist reaches its furthest-forward
+    position in the throwing direction. For a pitch, the wrist extends out toward
+    the plate at release, then pulls back across the body during follow-through.
+    So the max forward-x frame is release, and it sits BEFORE the peak
+    follow-through speed that fooled the old detector.
+    """
+    wser = _series(frames, sides["throw_wrist"], 0)
+    if len(wser) < 4:
         return None
-    best_i, best_speed = None, -1
-    for k in range(1, len(ser)):
-        (i_prev, x_prev), (i_cur, x_cur) = ser[k-1], ser[k]
-        speed = abs(x_cur - x_prev)
-        if speed > best_speed:
-            best_speed, best_i = speed, i_cur
+
+    # Throwing direction from net travel of the wrist's forward swing.
+    # Use the first third vs last third to be robust to noise.
+    third = max(1, len(wser) // 3)
+    x_early = sum(v for _, v in wser[:third]) / third
+    x_late = sum(v for _, v in wser[-third:]) / third
+    forward = 1 if (x_late - x_early) >= 0 else -1
+
+    # Release = frame with maximum wrist position in the throwing direction.
+    # (forward * x is largest when the wrist is furthest toward the plate.)
+    best_i, best_fx = None, -1e9
+    for i, x in wser:
+        fx = x * forward
+        if fx > best_fx:
+            best_fx, best_i = fx, i
     return best_i
 
 
