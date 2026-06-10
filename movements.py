@@ -10,8 +10,8 @@ MOVEMENTS dict at the bottom. Nothing else in the app changes.
 """
 from geometry import (
     pt, dist, line_angle, joint_angle, status_for,
-    L_SHOULDER, R_SHOULDER, L_HIP, R_HIP,
-    L_KNEE, R_KNEE, L_ANKLE, R_ANKLE, R_WRIST, R_ELBOW,
+    L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, L_WRIST, R_WRIST,
+    L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE,
 )
 
 
@@ -25,63 +25,160 @@ def _packaged(name, value, target, unit):
     }
 
 
-def _find_plant_frame(frames):
-    """Crude front-foot plant detector: frame where ankle separation is widest.
-    Good enough as the reference moment for stride and separation."""
-    best_i, best_sep = None, -1
+def _series(frames, idx, axis):
+    """Return list of (frame_i, value) for one landmark coordinate over time.
+    axis 0 = x, 1 = y. Skips frames where the landmark is missing."""
+    out = []
     for i, fr in enumerate(frames):
-        sep = dist(pt(fr, L_ANKLE), pt(fr, R_ANKLE))
-        if sep is not None and sep > best_sep:
-            best_sep, best_i = sep, i
+        p = pt(fr, idx)
+        if p is not None:
+            out.append((i, p[axis]))
+    return out
+
+
+def _detect_handedness(frames):
+    """Throwing arm = the wrist that travels the most horizontally during the
+    clip (the arm whips across). Returns the wrist/elbow/shoulder/knee/ankle
+    indices for the THROW side and the LEAD (front) side."""
+    lx = _series(frames, L_WRIST, 0)
+    rx = _series(frames, R_WRIST, 0)
+    l_range = (max(v for _, v in lx) - min(v for _, v in lx)) if len(lx) > 2 else 0
+    r_range = (max(v for _, v in rx) - min(v for _, v in rx)) if len(rx) > 2 else 0
+    if r_range >= l_range:
+        # right-handed: throw = right, lead leg = left
+        return {
+            "throw_wrist": R_WRIST, "throw_elbow": R_ELBOW, "throw_shoulder": R_SHOULDER,
+            "lead_hip": L_HIP, "lead_knee": L_KNEE, "lead_ankle": L_ANKLE,
+            "back_ankle": R_ANKLE,
+        }
+    return {
+        "throw_wrist": L_WRIST, "throw_elbow": L_ELBOW, "throw_shoulder": L_SHOULDER,
+        "lead_hip": R_HIP, "lead_knee": R_KNEE, "lead_ankle": R_ANKLE,
+        "back_ankle": L_ANKLE,
+    }
+
+
+def _detect_release_frame(frames, sides):
+    """Release = frame where the throwing wrist has peak forward speed.
+    Computed as the largest frame-to-frame horizontal displacement of the
+    throwing wrist. This reliably lands at/just before ball release."""
+    ser = _series(frames, sides["throw_wrist"], 0)
+    if len(ser) < 3:
+        return None
+    best_i, best_speed = None, -1
+    for k in range(1, len(ser)):
+        (i_prev, x_prev), (i_cur, x_cur) = ser[k-1], ser[k]
+        speed = abs(x_cur - x_prev)
+        if speed > best_speed:
+            best_speed, best_i = speed, i_cur
     return best_i
+
+
+def _detect_plant_frame(frames, sides, release_i):
+    """Plant = the frame BEFORE release where the lead foot stops moving forward.
+    We look at the lead ankle's horizontal position and find where its
+    frame-to-frame motion settles (decelerates) in the window leading up to
+    release. Falls back to ~60% of the way to release if motion is noisy."""
+    ser = [(i, x) for i, x in _series(frames, sides["lead_ankle"], 0)
+           if release_i is None or i <= release_i]
+    if len(ser) < 4:
+        return release_i
+    # speed per step
+    speeds = []
+    for k in range(1, len(ser)):
+        (i_prev, x_prev), (i_cur, x_cur) = ser[k-1], ser[k]
+        speeds.append((i_cur, abs(x_cur - x_prev)))
+    if not speeds:
+        return release_i
+    # peak stride speed, then first frame after it where speed drops below 20%
+    peak_speed = max(s for _, s in speeds)
+    peak_idx = next(i for i, s in speeds if s == peak_speed)
+    threshold = peak_speed * 0.2
+    for i, s in speeds:
+        if i > peak_idx and s < threshold:
+            return i
+    return peak_idx
 
 
 # ---------------------------------------------------------------------------
 # PITCHING (fully built + validated targets)
 # ---------------------------------------------------------------------------
 def pitching_metrics(frames, fps, height_in=None):
-    plant = _find_plant_frame(frames)
     out = []
+    sides = _detect_handedness(frames)
+    release = _detect_release_frame(frames, sides)
+    plant = _detect_plant_frame(frames, sides, release)
 
-    if plant is not None:
-        fr = frames[plant]
+    # ---- Measured at PLANT: stride + hip-shoulder separation ----
+    if plant is not None and frames[plant] is not None:
+        fp = frames[plant]
 
-        # Stride length as % of standing height (uses pixel proxy)
-        stride_px = dist(pt(fr, L_ANKLE), pt(fr, R_ANKLE))
-        # standing height proxy = shoulder midpoint to ankle, early frame
+        # Stride length: horizontal distance between feet at plant, as % of
+        # standing height. Height proxy = shoulder-to-ankle in an early frame
+        # where the pitcher is upright.
+        stride_px = abs(
+            (pt(fp, sides["lead_ankle"]) or (0, 0))[0]
+            - (pt(fp, sides["back_ankle"]) or (0, 0))[0]
+        ) if pt(fp, sides["lead_ankle"]) and pt(fp, sides["back_ankle"]) else None
+
         early = next((f for f in frames if f is not None), None)
         height_px = None
         if early is not None:
-            sh = pt(early, R_SHOULDER)
-            ank = pt(early, R_ANKLE)
+            sh = pt(early, sides["throw_shoulder"])
+            ank = pt(early, sides["back_ankle"])
             height_px = dist(sh, ank)
         stride_pct = (stride_px / height_px * 100) if (stride_px and height_px) else None
+        # clamp to sane range so a tracking glitch can't report nonsense
+        if stride_pct is not None and not (0 <= stride_pct <= 200):
+            stride_pct = None
         out.append(_packaged("Stride length", stride_pct, (85, 110), "% height"))
 
-        # Hip-shoulder separation at plant
-        hip_ang = line_angle(pt(fr, L_HIP), pt(fr, R_HIP))
-        sho_ang = line_angle(pt(fr, L_SHOULDER), pt(fr, R_SHOULDER))
-        sep = abs(hip_ang - sho_ang) if (hip_ang is not None and sho_ang is not None) else None
+        # Hip-shoulder separation: difference between hip-line and shoulder-line
+        # angles at plant. Normalize to 0-90 (a separation, not a signed angle).
+        hip_ang = line_angle(pt(fp, L_HIP), pt(fp, R_HIP))
+        sho_ang = line_angle(pt(fp, L_SHOULDER), pt(fp, R_SHOULDER))
+        sep = None
+        if hip_ang is not None and sho_ang is not None:
+            d = abs(hip_ang - sho_ang) % 180
+            sep = min(d, 180 - d)  # fold into 0-90
         out.append(_packaged("Hip-shoulder separation", sep, (40, 60), "deg"))
+    else:
+        out.append(_packaged("Stride length", None, (85, 110), "% height"))
+        out.append(_packaged("Hip-shoulder separation", None, (40, 60), "deg"))
 
-        # Front knee flexion (right side assumed lead for a lefty; adjust as needed)
-        knee = joint_angle(pt(fr, R_HIP), pt(fr, R_KNEE), pt(fr, R_ANKLE))
+    # ---- Measured at RELEASE: knee flexion + arm slot ----
+    if release is not None and frames[release] is not None:
+        fr = frames[release]
+
+        # Front knee flexion: 0 = straight leg, higher = more bend.
+        knee = joint_angle(pt(fr, sides["lead_hip"]),
+                           pt(fr, sides["lead_knee"]),
+                           pt(fr, sides["lead_ankle"]))
         knee_flex = (180 - knee) if knee is not None else None
+        if knee_flex is not None and not (0 <= knee_flex <= 120):
+            knee_flex = None
         out.append(_packaged("Front knee flexion", knee_flex, (30, 45), "deg"))
 
-        # Arm slot at plant (shoulder-elbow-wrist line vs horizontal)
-        slot = line_angle(pt(fr, R_SHOULDER), pt(fr, R_WRIST))
-        slot_abs = abs(slot) if slot is not None else None
-        out.append(_packaged("Arm slot", slot_abs, (75, 95), "deg"))
+        # Arm slot: angle of the upper arm (shoulder->elbow) above horizontal.
+        # Fold to 0-90 so a sideways-or-down arm can't read as 170.
+        slot = line_angle(pt(fr, sides["throw_shoulder"]), pt(fr, sides["throw_elbow"]))
+        slot_abs = None
+        if slot is not None:
+            a = abs(slot) % 180
+            slot_abs = min(a, 180 - a)  # fold into 0-90
+        out.append(_packaged("Arm slot", slot_abs, (45, 90), "deg"))
+    else:
+        out.append(_packaged("Front knee flexion", None, (30, 45), "deg"))
+        out.append(_packaged("Arm slot", None, (45, 90), "deg"))
 
-    return {"reference_frame": plant, "items": out}
+    return {"reference_frame": {"plant": plant, "release": release}, "items": out}
 
 
 PITCHING_TARGETS = {
     "Stride length": [85, 110],
     "Hip-shoulder separation": [40, 60],
     "Front knee flexion": [30, 45],
-    "Arm slot": [75, 95],
+    "Arm slot": [45, 90],
 }
 
 
@@ -89,7 +186,7 @@ PITCHING_TARGETS = {
 # HITTING (stub - structure ready, validate ranges before trusting numbers)
 # ---------------------------------------------------------------------------
 def hitting_metrics(frames, fps, height_in=None):
-    contact = _find_plant_frame(frames)  # placeholder reference moment
+    contact = _detect_release_frame(frames, _detect_handedness(frames))  # placeholder
     out = []
     if contact is not None:
         fr = frames[contact]
@@ -108,7 +205,8 @@ HITTING_TARGETS = {"Hip-shoulder separation": [35, 55]}
 # SOCCER KICK (stub)
 # ---------------------------------------------------------------------------
 def kick_metrics(frames, fps, height_in=None):
-    plant = _find_plant_frame(frames)
+    sides = _detect_handedness(frames)
+    plant = _detect_plant_frame(frames, sides, _detect_release_frame(frames, sides))
     out = []
     if plant is not None:
         fr = frames[plant]
