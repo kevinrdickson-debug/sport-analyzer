@@ -59,30 +59,36 @@ def _detect_handedness(frames):
 
 
 def _detect_release_frame(frames, sides):
-    """Release = the frame where the throwing wrist reaches its furthest-forward
-    position in the throwing direction. For a pitch, the wrist extends out toward
-    the plate at release, then pulls back across the body during follow-through.
-    So the max forward-x frame is release, and it sits BEFORE the peak
-    follow-through speed that fooled the old detector.
+    """Release = frame where the throwing wrist is near its HIGHEST point
+    (smallest y, since y increases downward), up near the head, just before the
+    arm whips down and across into follow-through.
+
+    Verified against real footage: at release the wrist/elbow are up high; in
+    follow-through the wrist drops to shoulder height and flings out to the side
+    (which is why max-x and peak-speed detectors both fired too late).
+
+    To avoid catching the early cocked/leg-lift phase (wrist also high there),
+    we only consider frames in the back half of the clip, after the stride.
     """
-    wser = _series(frames, sides["throw_wrist"], 0)
+    wser = _series(frames, sides["throw_wrist"], 1)  # axis 1 = y (height)
     if len(wser) < 4:
         return None
 
-    # Throwing direction from net travel of the wrist's forward swing.
-    # Use the first third vs last third to be robust to noise.
-    third = max(1, len(wser) // 3)
-    x_early = sum(v for _, v in wser[:third]) / third
-    x_late = sum(v for _, v in wser[-third:]) / third
-    forward = 1 if (x_late - x_early) >= 0 else -1
+    # Restrict to the throwing phase: skip the first 55% of tracked frames so
+    # we don't catch the wind-up where the hand is also raised.
+    start_cut = wser[int(len(wser) * 0.55)][0]
 
-    # Release = frame with maximum wrist position in the throwing direction.
-    # (forward * x is largest when the wrist is furthest toward the plate.)
-    best_i, best_fx = None, -1e9
-    for i, x in wser:
-        fx = x * forward
-        if fx > best_fx:
-            best_fx, best_i = fx, i
+    # Highest wrist = minimum y, within the throwing-phase window.
+    best_i, best_y = None, 1e9
+    for i, y in wser:
+        if i < start_cut:
+            continue
+        if y < best_y:
+            best_y, best_i = y, i
+
+    # Fallback if the window filtered everything out.
+    if best_i is None:
+        best_i = min(wser, key=lambda t: t[1])[0]
     return best_i
 
 
@@ -133,17 +139,34 @@ def pitching_metrics(frames, fps, height_in=None):
             - (pt(fp, sides["back_ankle"]) or (0, 0))[0]
         ) if pt(fp, sides["lead_ankle"]) and pt(fp, sides["back_ankle"]) else None
 
-        early = next((f for f in frames if f is not None), None)
-        height_px = None
-        if early is not None:
-            sh = pt(early, sides["throw_shoulder"])
-            ank = pt(early, sides["back_ankle"])
-            height_px = dist(sh, ank)
-        stride_pct = (stride_px / height_px * 100) if (stride_px and height_px) else None
-        # clamp to sane range so a tracking glitch can't report nonsense
-        if stride_pct is not None and not (0 <= stride_pct <= 200):
-            stride_pct = None
-        out.append(_packaged("Stride length", stride_pct, (85, 110), "% height"))
+        # STRIDE INDEX (relative, not textbook % of height).
+        # A single 2D camera that isn't perfectly perpendicular can't give a
+        # trustworthy absolute stride-as-%-of-height. So we report a relative
+        # index normalized to the athlete's own leg length, useful for tracking
+        # Kade vs Kade over time with the same camera setup.
+        #
+        # Normalize stride (ankle-to-ankle horizontal) by lead-leg length
+        # (hip->knee->ankle), the most stable body segment to measure in 2D.
+        # Scale x100 so a typical full stride reads near 100.
+        stride_px = abs(
+            (pt(fp, sides["lead_ankle"]) or (0, 0))[0]
+            - (pt(fp, sides["back_ankle"]) or (0, 0))[0]
+        ) if pt(fp, sides["lead_ankle"]) and pt(fp, sides["back_ankle"]) else None
+
+        leg_px = None
+        lh, lk, la = (pt(fp, sides["lead_hip"]), pt(fp, sides["lead_knee"]),
+                      pt(fp, sides["lead_ankle"]))
+        if lh and lk and la:
+            seg1 = dist(lh, lk)
+            seg2 = dist(lk, la)
+            if seg1 and seg2:
+                leg_px = seg1 + seg2
+        stride_index = (stride_px / leg_px * 100) if (stride_px and leg_px) else None
+        if stride_index is not None and not (0 <= stride_index <= 400):
+            stride_index = None
+        # Target band is provisional and calibrates to Kade's own baseline over
+        # several sessions. Treat color as "vs his own norm," not absolute.
+        out.append(_packaged("Stride index", stride_index, (90, 140), "rel"))
 
         # Hip-shoulder separation: difference between hip-line and shoulder-line
         # angles at plant. Normalize to 0-90 (a separation, not a signed angle).
@@ -155,7 +178,7 @@ def pitching_metrics(frames, fps, height_in=None):
             sep = min(d, 180 - d)  # fold into 0-90
         out.append(_packaged("Hip-shoulder separation", sep, (40, 60), "deg"))
     else:
-        out.append(_packaged("Stride length", None, (85, 110), "% height"))
+        out.append(_packaged("Stride index", None, (90, 140), "rel"))
         out.append(_packaged("Hip-shoulder separation", None, (40, 60), "deg"))
 
     # ---- Measured at RELEASE: knee flexion + arm slot ----
@@ -187,7 +210,7 @@ def pitching_metrics(frames, fps, height_in=None):
 
 
 PITCHING_TARGETS = {
-    "Stride length": [85, 110],
+    "Stride index": [90, 140],
     "Hip-shoulder separation": [40, 60],
     "Front knee flexion": [30, 45],
     "Arm slot": [45, 90],
