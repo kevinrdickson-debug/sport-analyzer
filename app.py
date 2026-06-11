@@ -97,9 +97,19 @@ def analyze():
         except (KeyError, ValueError):
             velocity_mph = None
 
+        # Release frame from the user's ball tap (preferred). Auto-detected as
+        # fallback inside the metric function when this is None.
+        release_frame = None
+        try:
+            if "release_frame" in f and f.get("release_frame") != "":
+                release_frame = int(float(f["release_frame"]))
+        except (KeyError, ValueError):
+            release_frame = None
+
         # Movement-specific mechanical metrics
         metric_fn = MOVEMENTS[movement]["metrics"]
-        metrics = metric_fn(frames, fps, height_in=height_in)
+        metrics = metric_fn(frames, fps, height_in=height_in,
+                            release_frame=release_frame)
 
         payload = {
             "movement": movement,
