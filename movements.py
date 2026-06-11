@@ -121,10 +121,14 @@ def _detect_plant_frame(frames, sides, release_i):
 # ---------------------------------------------------------------------------
 # PITCHING (fully built + validated targets)
 # ---------------------------------------------------------------------------
-def pitching_metrics(frames, fps, height_in=None):
+def pitching_metrics(frames, fps, height_in=None, release_frame=None):
     out = []
     sides = _detect_handedness(frames)
-    release = _detect_release_frame(frames, sides)
+    # Release is provided by the user's ball tap (accurate). Only auto-detect
+    # as a fallback when no tap was sent.
+    release = release_frame if release_frame is not None else _detect_release_frame(frames, sides)
+    if release is not None and not (0 <= release < len(frames)):
+        release = None
     plant = _detect_plant_frame(frames, sides, release)
 
     # ---- Measured at PLANT: stride + hip-shoulder separation ----
@@ -220,7 +224,7 @@ PITCHING_TARGETS = {
 # ---------------------------------------------------------------------------
 # HITTING (stub - structure ready, validate ranges before trusting numbers)
 # ---------------------------------------------------------------------------
-def hitting_metrics(frames, fps, height_in=None):
+def hitting_metrics(frames, fps, height_in=None, release_frame=None):
     contact = _detect_release_frame(frames, _detect_handedness(frames))  # placeholder
     out = []
     if contact is not None:
@@ -239,7 +243,7 @@ HITTING_TARGETS = {"Hip-shoulder separation": [35, 55]}
 # ---------------------------------------------------------------------------
 # SOCCER KICK (stub)
 # ---------------------------------------------------------------------------
-def kick_metrics(frames, fps, height_in=None):
+def kick_metrics(frames, fps, height_in=None, release_frame=None):
     sides = _detect_handedness(frames)
     plant = _detect_plant_frame(frames, sides, _detect_release_frame(frames, sides))
     out = []
@@ -257,7 +261,7 @@ KICK_TARGETS = {"Hip line at plant": [-20, 20]}
 # ---------------------------------------------------------------------------
 # FIELDING (stub - hardest, sequence-based, add last)
 # ---------------------------------------------------------------------------
-def fielding_metrics(frames, fps, height_in=None):
+def fielding_metrics(frames, fps, height_in=None, release_frame=None):
     return {"reference_frame": None, "items": [],
             "note": "fielding is sequence-based, not yet implemented"}
 
