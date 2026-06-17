@@ -13,15 +13,18 @@ from geometry import (
     L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, L_WRIST, R_WRIST,
     L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE,
 )
+from explanations import explain
 
 
 def _packaged(name, value, target, unit):
+    status = status_for(value, target)
     return {
         "name": name,
         "value": round(value, 1) if value is not None else None,
         "target": target,
         "unit": unit,
-        "status": status_for(value, target),
+        "status": status,
+        "explanation": explain(name, status),
     }
 
 
