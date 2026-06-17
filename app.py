@@ -131,6 +131,89 @@ def analyze():
         os.unlink(tmp.name)
 
 
+@app.route("/coach", methods=["POST"])
+def coach():
+    """OPTIONAL AI coaching summary. Called only when the user taps 'Generate
+    coaching summary'. Takes the already-computed metrics JSON and returns a
+    short natural-language read across all metrics together.
+
+    Requires ANTHROPIC_API_KEY in the environment (set it in Render's env vars).
+    If the key is absent, returns a clear message instead of failing.
+    """
+    import json as _json
+    import urllib.request
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return jsonify({
+            "summary": None,
+            "error": "AI summary unavailable: ANTHROPIC_API_KEY not set on the "
+                     "server. Add it in Render > Environment to enable this."
+        }), 200
+
+    body = request.get_json(silent=True) or {}
+    metrics = body.get("metrics", {})
+    movement = body.get("movement", "pitching")
+    athlete = body.get("athlete", "the athlete")
+
+    # Build a tightly-scoped prompt with the guardrails baked in.
+    items = metrics.get("items", [])
+    lines = []
+    for it in items:
+        lines.append(
+            f"- {it['name']}: {it.get('value')} {it.get('unit')} "
+            f"(status {it.get('status')}, target {it.get('target')})"
+        )
+    metric_block = "\n".join(lines) if lines else "(no metrics available)"
+
+    system = (
+        "You are helping a parent review youth baseball pitching mechanics from "
+        "automated 2D video metrics. Be concise and practical. Hard rules: "
+        "(1) The target bands are GENERIC and not yet calibrated to this athlete, "
+        "and a 2D side camera compresses some angles, so frame everything as "
+        "'if this holds across several pitches.' "
+        "(2) Do NOT invent specific drills, rep counts, or biomechanical claims; "
+        "where real coaching judgment is needed, say to check with his coach. "
+        "(3) No medical or injury claims. "
+        "(4) 4-6 sentences max. Note the single most useful thing to watch next."
+    )
+    user = (
+        f"Movement: {movement}. Athlete: {athlete}.\n"
+        f"Measured at a release frame the user verified by eye.\n\n"
+        f"Metrics:\n{metric_block}\n\n"
+        f"Give a short, honest read across these together. What stands out, "
+        f"what might be camera/calibration noise, and the one thing to watch "
+        f"on the next few pitches."
+    )
+
+    req_body = _json.dumps({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 400,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=req_body,
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        text = "".join(
+            b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+        ).strip()
+        return jsonify({"summary": text or "(empty response)", "error": None})
+    except Exception as e:
+        return jsonify({"summary": None, "error": f"AI request failed: {e}"}), 200
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
